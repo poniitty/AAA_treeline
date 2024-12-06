@@ -166,8 +166,8 @@ results <- lapply(polids, function(i){
   
   # plot(dem)
   
-  unlink(list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE))
-  unlink(list.files(predictor_dir, pattern = "_Map.tif", full.names = TRUE))
+  unlink(esas)
+  unlink(dems)
   
   esa <- aggregate(esa, 3, getmode)
   esa <- project(esa, dem, method="near")

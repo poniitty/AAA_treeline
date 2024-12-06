@@ -51,10 +51,8 @@ polids <- g %>%
          Y < 72) %>% 
   pull(polid)
 
-results <- mclapply(polids[1:10], mc.cores = 5, 
-                    FUN = function(i){
+results <- lapply(polids, function(i){
   # i <- 29053
-  
   print(i)
   aoi <- g %>% filter(polid == i)
   
@@ -157,4 +155,118 @@ results <- mclapply(polids[1:10], mc.cores = 5,
             "-tr", c(30, 30)
           )
         )
-      }, silent 
+      }, silent = TRUE)
+      if(class(e)[[1]] == "try-error"){
+        return(FALSE)
+      } else {
+        return(TRUE)
+      }
+    })
+  })
+  
+  dems <- list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE)
+  
+  dems <- lapply(dems, function(x){
+    dem <- rast(x)
+    dem[dem == 0] <- NA
+    # dem <- resample(dem, r)
+    return(dem)
+  })
+  
+  dem <- sprc(dems)
+  dem <- mosaic(dem)
+  dem[dem < 0] <- 0
+  dem[is.na(dem)] <- 0
+  
+  # plot(dem)
+  
+  unlink(esas)
+  unlink(dems)
+  
+  esa <- aggregate(esa, 3, getmode)
+  esa <- project(esa, dem, method="near")
+  # plot(esa)
+  
+  esa[esa %in% c(40,50,80,90)] <- NA
+  rmask <- focal(esa, 7, min, na.rm = FALSE, expand = TRUE, fillvalue = 100)
+  esa <- mask(esa, rmask)
+  esa <- ifel(esa == 10, 1, 0)
+  # plot(esa)
+  r <- c(dem, esa)
+  names(r) <- c("dem","esa")
+  
+  df <- as.data.frame(r, na.rm = TRUE)
+  if(nrow(df) > 1000){
+    # summary(df)
+    
+    # df %>%
+    #   sample_n(size = 10000) %>%
+    #   ggplot(aes(y = esa, x = dem)) +
+    #   geom_smooth(method = "gam",
+    #               method.args=list(family="binomial"))
+    
+    m <- gam(esa ~ s(dem), data = df %>% sample_n(size = ifelse(nrow(df) > 20000, 20000, nrow(df))),
+             family = "binomial")
+    s <- summary(m)
+    
+    pr <- tibble(dem = seq(from = min(df$dem), to = max(df$dem), by = 1)) %>% 
+      mutate(fprob = predict(m, ., type = "response")) %>% 
+      mutate(fprob_scaled = rescale(fprob, to = c(0,1)))
+    
+    if(max(pr$fprob) >= 0.1 & min(pr$fprob) <= 0.9){
+      results <- tibble(polid = as.integer(i),
+                        lat = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(Y),
+                        lon = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(X),
+                        minele = min(df$dem),
+                        maxele = max(df$dem),
+                        landprop = nrow(df)/ncell(dem),
+                        forestprop = mean(df$esa),
+                        forestq95 = quantile(df %>% filter(esa == 1) %>% pull(dem), 0.95),
+                        forestq99 = quantile(df %>% filter(esa == 1) %>% pull(dem), 0.99),
+                        maxforestele = quantile(df %>% filter(esa == 1) %>% pull(dem), 1),
+                        gamR2 = s$r.sq,
+                        maxfprob = max(pr$fprob),
+                        minfprob = min(pr$fprob),
+                        forestprob99ele = pr %>% filter(fprob > 0.99) %>% pull(dem) %>% max(),
+                        forestprob95ele = pr %>% filter(fprob > 0.95) %>% pull(dem) %>% max(),
+                        forestprob90ele = pr %>% filter(fprob > 0.9) %>% pull(dem) %>% max(),
+                        forestprob75ele = pr %>% filter(fprob > 0.75) %>% pull(dem) %>% max(),
+                        forestprob50ele = pr %>% filter(fprob > 0.5) %>% pull(dem) %>% max(),
+                        forestprob25ele = pr %>% filter(fprob > 0.25) %>% pull(dem) %>% max(),
+                        forestprob10ele = pr %>% filter(fprob > 0.1) %>% pull(dem) %>% max(),
+                        forestprob05ele = pr %>% filter(fprob > 0.05) %>% pull(dem) %>% max(),
+                        forestprob01ele = pr %>% filter(fprob > 0.01) %>% pull(dem) %>% max(),
+                        forestprobscaled99ele = pr %>% filter(fprob_scaled > 0.99) %>% pull(dem) %>% max(),
+                        forestprobscaled95ele = pr %>% filter(fprob_scaled > 0.95) %>% pull(dem) %>% max(),
+                        forestprobscaled90ele = pr %>% filter(fprob_scaled > 0.9) %>% pull(dem) %>% max(),
+                        forestprobscaled75ele = pr %>% filter(fprob_scaled > 0.75) %>% pull(dem) %>% max(),
+                        forestprobscaled50ele = pr %>% filter(fprob_scaled > 0.5) %>% pull(dem) %>% max(),
+                        forestprobscaled25ele = pr %>% filter(fprob_scaled > 0.25) %>% pull(dem) %>% max(),
+                        forestprobscaled10ele = pr %>% filter(fprob_scaled > 0.1) %>% pull(dem) %>% max(),
+                        forestprobscaled05ele = pr %>% filter(fprob_scaled > 0.05) %>% pull(dem) %>% max(),
+                        forestprobscaled01ele = pr %>% filter(fprob_scaled > 0.01) %>% pull(dem) %>% max()) %>% 
+        mutate(across(landprop:forestprobscaled01ele, ~round(.x, 3))) %>% 
+        mutate(across(where(is.double), ~ifelse(is.infinite(.x), NA, .x)))
+    } else {
+      results <- tibble(polid = as.integer(i),
+                        lat = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(Y),
+                        lon = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(X),
+                        minele = min(df$dem),
+                        maxele = max(df$dem),
+                        landprop = nrow(df)/ncell(dem),
+                        forestprop = mean(df$esa)) %>% 
+        mutate(across(landprop:forestprop, ~round(.x, 3))) %>% 
+        mutate(across(where(is.double), ~ifelse(is.infinite(.x), NA, .x)))
+    }
+    return(results)
+  } else {
+    mm <- minmax(dem)
+    results <- tibble(polid = as.integer(i),
+                      lat = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(Y),
+                      lon = st_centroid(aoi) %>% st_coordinates() %>% as.data.frame() %>% pull(X),
+                      minele = mm[1,1],
+                      maxele = mm[2,1])
+    return(results)
+  }
+  unlink(tmpFiles())
+})
