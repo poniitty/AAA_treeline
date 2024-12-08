@@ -4,6 +4,8 @@ library(terra)
 library(rstac)
 library(mgcv)
 library(scales)
+library(foreach)
+library(doParallel)
 
 make_vsicurl_url_dem <- function(base_url) {
   paste0(
@@ -28,6 +30,12 @@ getmode <- function(v) {
   uniqv[which.max(tabulate(match(v, uniqv)))]
 }
 
+setwd("/projappl/project_2007415/repos/AAA_treeline")
+
+workers <- min(c(length(future::availableWorkers()),
+                 future::availableCores()))
+print(workers)
+
 g <- st_read("/scratch/project_2007415/AAA_treelines/AAA_treeline_initial_grid.gpkg")
 
 predictor_dir <- tempdir()
@@ -35,9 +43,19 @@ predictor_dir <- tempdir()
 utmall <- st_read("data/utm_zones.gpkg") %>% 
   filter(ZONE != 0)
 
-polids <- g %>% sample_n(size = 100) %>% pull(polid)
+g <- bind_cols(g,
+               g %>% st_centroid() %>% st_coordinates())
 
-results <- lapply(polids, function(i){
+polids <- g %>% 
+  filter(X > 5,
+         X < 17,
+         Y > 41,
+         Y < 48) %>% 
+  pull(polid)
+
+results <- mclapply(polids, 
+                    mc.cores = workers,  
+                    FUN = function(i){
   # i <- 29053
   print(i)
   aoi <- g %>% filter(polid == i)
@@ -71,15 +89,16 @@ results <- lapply(polids, function(i){
     # ft <- it_obj$features[[1]]
     full_url <- make_vsicurl_url_esa(assets_url(ft) %>% sort)
     full_url <- full_url[endsWith(full_url, "_Map.tif")]
-    file_names <- gsub("TIF$","tif",basename(full_url))
     
     juuh <- lapply(seq_len(length(full_url)), function(nr){
       # nr <- 1
+      file_name <- paste0(tempfile(), ".tif")
+      
       e <- try({
         gdal_utils(
           util = "warp",
           source = full_url[[nr]],
-          destination = paste0(predictor_dir,"/",file_names[[nr]]),
+          destination = file_name,
           options = c(
             "-t_srs", sf::st_crs(aoi_pr)$wkt,
             "-te", sf::st_bbox(aoi_pr),
@@ -88,23 +107,24 @@ results <- lapply(polids, function(i){
         )
       }, silent = TRUE)
       if(class(e)[[1]] == "try-error"){
-        return(FALSE)
+        return(NULL)
       } else {
-        return(TRUE)
+        return(file_name)
       }
-    })
-  })
+    }) %>% unlist
+    return(juuh)
+  }) %>% unlist
   
-  esas <- list.files(predictor_dir, pattern = "_Map.tif", full.names = TRUE)
+  esas <- juuh
   
-  esas <- lapply(esas, function(x){
+  esa <- lapply(esas, function(x){
     esa <- rast(x)
     esa[esa == 0] <- NA
     # dem <- resample(dem, r)
     return(esa)
   })
   
-  esa <- sprc(esas)
+  esa <- sprc(esa)
   esa <- mosaic(esa, fun = "max")
   esa[esa < 0] <- 0
   esa[is.na(esa)] <- 0
@@ -127,14 +147,15 @@ results <- lapply(polids, function(i){
     # print(ft$id)
     full_url <- make_vsicurl_url_dem(assets_url(ft) %>% sort)
     full_url <- full_url[endsWith(full_url, "_DSM.tif")]
-    file_names <- gsub("TIF$","tif",basename(full_url))
     
     juuh <- lapply(seq_len(length(full_url)), function(nr){
+      file_name <- paste0(tempfile(), ".tif")
+      
       e <- try({
         gdal_utils(
           "warp",
           source = full_url[[nr]],
-          destination = paste0(predictor_dir,"/",file_names[[nr]]),
+          destination = file_name,
           options = c(
             "-t_srs", sf::st_crs(aoi_pr)$wkt,
             "-te", sf::st_bbox(aoi_pr),
@@ -143,23 +164,24 @@ results <- lapply(polids, function(i){
         )
       }, silent = TRUE)
       if(class(e)[[1]] == "try-error"){
-        return(FALSE)
+        return(NULL)
       } else {
-        return(TRUE)
+        return(file_name)
       }
-    })
-  })
+    }) %>% unlist
+    return(juuh)
+  }) %>% unlist
   
-  dems <- list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE)
+  dems <- juuh
   
-  dems <- lapply(dems, function(x){
+  dem <- lapply(dems, function(x){
     dem <- rast(x)
     dem[dem == 0] <- NA
     # dem <- resample(dem, r)
     return(dem)
   })
   
-  dem <- sprc(dems)
+  dem <- sprc(dem)
   dem <- mosaic(dem)
   dem[dem < 0] <- 0
   dem[is.na(dem)] <- 0
@@ -254,7 +276,17 @@ results <- lapply(polids, function(i){
                       maxele = mm[2,1])
     return(results)
   }
-  unlink(tmpFiles())
 })
+results <- results %>% bind_rows()
+results %>% write_csv("output/alps.csv")
 
-bind_rows(results) %>% view
+po <- results %>% 
+  arrange(polid) %>% 
+  mutate(rangeele = maxele - minele) %>% 
+  filter(rangeele > 300) %>% 
+  filter(maxele != forestprob50ele) %>% 
+  st_as_sf(coords = c("lon","lat"), crs = 4326)
+results %>% view
+plot(po[,"forestprob50ele"], pch = 20)
+
+po %>% st_write("output/alps.gpkg")
